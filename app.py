@@ -12,7 +12,8 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.prompts import PromptTemplate
 import google.generativeai as genai
 import os
-
+from langchain.chains import LLMChain
+from langchain.chains.question_answering import load_qa_chain
 load_dotenv()
 
 
@@ -45,39 +46,79 @@ def get_conversation_chain(vectorstore):
     model = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
     
     prompt_template = """
-    Answer the question in detail from the provided context, make sure to cover all the relevant points.\n
-    If the answer is not provided in the context just say, "answer is not available in the context".\n
-    Dont provide the wrong answer.\n
+    Assume that the only information you have is the context given nothing else.
+    The use of the contextual knowledge must be evident. Answer in an descriptive format.
+    Answer the question in detail from the provided document, make sure to cover all the relevant points, there should be no additonal information, only reply based on document.\n
+    Use on the contexts to formulate the response. The response must NOT contain anything that is not there in the context give.If the answer is not provided in the context just say, "answer is not available in the context".\n
+    Dont provide the wrong answer.do not mention anything not in the document, the entire response must be crafted strictly from what is avaliabe in the context. Also dont add any extra observations or considerations on your own if not present in the context\n
     Context:\n{context}?\n
     Question:\n{question}\n
 
     Answer:
     """
     prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
-    
+
+    # Create a memory buffer for conversation history
     memory = ConversationBufferMemory(memory_key='chat_history', return_messages=True)
-    
+
+    # Create the ConversationalRetrievalChain with the custom prompt
     conversation_chain = ConversationalRetrievalChain.from_llm(
         llm=model,
         retriever=vectorstore.as_retriever(),
-        memory=memory
+        memory=memory,  # We can handle this through the prompt
+        combine_docs_chain_kwargs={"prompt": prompt}
     )
+    
     return conversation_chain
+
+import re
+
+def clean_and_truncate_text(text, word_limit=50):
+    # Remove broken words (words split by spaces like "Spri ng Bo ot")
+    cleaned_text = re.sub(r'(\w+)\s+(\w+)', lambda match: match.group(1) + match.group(2) if match.group(1).lower() in ['spring', 'boot', 'java', 'project'] else ' '.join(match.groups()), text)
+    
+    # Replace excessive spaces with a single space
+    cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+
+    # Limit to the first 50 words and add ellipsis
+    truncated_text = ' '.join(cleaned_text.split()[:word_limit]) + '...'
+    
+    return truncated_text
 
 def handle_userinput(user_question):
     if st.session_state.conversation:
+        # Get the top 3 most relevant documents (text chunks)
+        top_k_docs = st.session_state.conversation.retriever.get_relevant_documents(user_question)[:3]
+
+        # Generate the content of the context as a numbered and cleaned list
+        context_paragraphs = ""
+        for i, doc in enumerate(top_k_docs, 1):
+            cleaned_text = clean_and_truncate_text(doc.page_content)
+            context_paragraphs += f"{i}. {cleaned_text}\n\n"
+
+        # Get the model's response
         response = st.session_state.conversation({'question': user_question})
         st.session_state.chat_history = response['chat_history']
 
+        # Display chat history (user and bot), attach context dropdown to bot responses
         for i, message in enumerate(st.session_state.chat_history):
             if i % 2 == 0:
+                # User message
                 st.write(user_template.replace(
                     "{{MSG}}", message.content), unsafe_allow_html=True)
             else:
-                st.write(bot_template.replace(
-                    "{{MSG}}", message.content), unsafe_allow_html=True)
+                # Bot response
+                bot_response = bot_template.replace(
+                    "{{MSG}}", message.content)
+                st.write(bot_response, unsafe_allow_html=True)
+
+                # Show context as an expander (instead of <details>)
+                with st.expander("Show relevant context"):
+                    st.write(context_paragraphs)
+
     else:
         st.write("Conversation chain is not initialized. Please process your documents first.")
+
 
 def main():
     load_dotenv()
